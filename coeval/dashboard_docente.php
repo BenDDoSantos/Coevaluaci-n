@@ -7,6 +7,8 @@ error_reporting(E_ALL);
 require 'db.php';
 verificar_sesion(true); // Solo para docentes
 
+// Session timeout check and update is handled in db.php
+
 // --- BLOQUE AÑADIR---
 // Cargar la escala de notas en un array para consulta rápida
 $escala_lookup = [];

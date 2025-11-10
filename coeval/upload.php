@@ -1,6 +1,9 @@
 <?php
 require 'db.php';
-verificar_sesion(true); // Solo docentes
+// Requerir ser docente Y tener un curso activo
+verificar_sesion(true, true); 
+
+$id_curso_activo = get_active_course_id();
 
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes'])) {
 
@@ -36,7 +39,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes']))
 
                 // Validación estricta de 3 columnas CON equipo
                 if (count($datos) < 3 || empty(trim($datos[0])) || empty(trim($datos[1])) || empty(trim($datos[2]))) {
-                    // Si la fila no está completamente vacía, reportar error, si no, solo ignorar (ej. línea en blanco al final)
+                    // Si la fila no está completamente vacía, reportar error
                     if(array_filter($datos)) { 
                          $errores[] = "Fila $fila_num mal formada o datos incompletos (Nombre, Correo y Equipo son obligatorios).";
                     }
@@ -49,15 +52,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes']))
                 $id_equipo = null;
 
                 // --- Procesar Equipo ---
-                $stmt_equipo = $conn->prepare("SELECT id FROM equipos WHERE nombre_equipo = ?");
-                $stmt_equipo->bind_param("s", $nombre_equipo);
+                // La búsqueda del equipo ahora DEBE incluir el id_curso_activo
+                $stmt_equipo = $conn->prepare("SELECT id FROM equipos WHERE nombre_equipo = ? AND id_curso = ?");
+                $stmt_equipo->bind_param("si", $nombre_equipo, $id_curso_activo);
                 $stmt_equipo->execute();
                 $res_equipo = $stmt_equipo->get_result();
                 
                 if ($res_equipo->num_rows == 0) {
-                    // Si el equipo no existe, lo crea
-                    $stmt_insert_equipo = $conn->prepare("INSERT INTO equipos (nombre_equipo) VALUES (?)");
-                    $stmt_insert_equipo->bind_param("s", $nombre_equipo);
+                    // Si el equipo no existe, lo crea y le ASIGNA el id_curso_activo
+                    $stmt_insert_equipo = $conn->prepare("INSERT INTO equipos (nombre_equipo, id_curso) VALUES (?, ?)");
+                    $stmt_insert_equipo->bind_param("si", $nombre_equipo, $id_curso_activo);
                     $stmt_insert_equipo->execute();
                     $id_equipo = $conn->insert_id;
                     $stmt_insert_equipo->close();
@@ -68,10 +72,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes']))
                 $stmt_equipo->close();
 
                 // --- Procesar Usuario (Estudiante) ---
-                // Inserta al usuario si no existe (basado en el email ÚNICO) o actualiza su nombre y equipo si ya existe.
-                $stmt_usuario = $conn->prepare("INSERT INTO usuarios (nombre, email, id_equipo, es_docente) VALUES (?, ?, ?, FALSE) 
-                                                 ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), id_equipo = VALUES(id_equipo)");
-                $stmt_usuario->bind_param("ssi", $nombre, $email, $id_equipo);
+                // Inserta/Actualiza al usuario, asignándole el id_curso y id_equipo
+                $stmt_usuario = $conn->prepare("INSERT INTO usuarios (nombre, email, id_equipo, es_docente, id_curso) VALUES (?, ?, ?, FALSE, ?) 
+                                                 ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), id_equipo = VALUES(id_equipo), id_curso = VALUES(id_curso)");
+                $stmt_usuario->bind_param("ssii", $nombre, $email, $id_equipo, $id_curso_activo);
                 $stmt_usuario->execute();
                 
                 if ($stmt_usuario->affected_rows > 0) {
@@ -82,7 +86,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes']))
             fclose($gestor);
             $conn->commit(); // Confirmar todos los cambios si el bucle terminó sin errores fatales
             
-            $mensaje = "Éxito: " . $registros_procesados . " registros procesados/actualizados.";
+            $mensaje = "Éxito: " . $registros_procesados . " registros procesados/actualizados en el curso activo.";
             if (!empty($errores)) {
                 $mensaje .= " Se omitieron " . count($errores) . " filas por errores.";
             }
@@ -90,10 +94,10 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_FILES['lista_estudiantes']))
 
         } catch (Exception $e) {
             $conn->rollback(); // Revertir todo si algo falló
-            header("Location: dashboard_docente.php?status=" . urlencode("Error Crítico: " . $e->getMessage()));
+            header("Location: dashboard_docente.php?status=" . urlencode("Error Crítico al procesar el archivo: " . $e->getMessage()));
         }
     } else {
-        header("Location: dashboard_docente.php?status=" . urlencode("Error al intentar abrir el archivo CSV. Verifique permisos."));
+        header("Location: dashboard_docente.php?status=" . urlencode("Error al intentar abrir el archivo CSV."));
     }
 }
 ?>

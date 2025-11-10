@@ -1,8 +1,25 @@
 <?php
 require 'db.php';
-verificar_sesion(true); // Solo docentes
+// Requerir ser docente Y tener un curso activo
+verificar_sesion(true, true); 
 
-$criterios = $conn->query("SELECT * FROM criterios ORDER BY orden ASC");
+$id_curso_activo = get_active_course_id();
+
+// Consulta CLAVE: Filtrar criterios por el curso activo
+$stmt_criterios = $conn->prepare("SELECT * FROM criterios WHERE id_curso = ? ORDER BY orden ASC");
+$stmt_criterios->bind_param("i", $id_curso_activo);
+$stmt_criterios->execute();
+$criterios = $stmt_criterios->get_result();
+
+// Opcional: Obtener el nombre del curso para el título
+$stmt_curso = $conn->prepare("SELECT nombre_curso, semestre FROM cursos WHERE id = ?");
+$stmt_curso->bind_param("i", $id_curso_activo);
+$stmt_curso->execute();
+$curso_activo = $stmt_curso->get_result()->fetch_assoc();
+$stmt_curso->close();
+
+$status_message = isset($_GET['status']) ? htmlspecialchars($_GET['status']) : '';
+$error_message = isset($_GET['error']) ? htmlspecialchars($_GET['error']) : '';
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -15,14 +32,25 @@ $criterios = $conn->query("SELECT * FROM criterios ORDER BY orden ASC");
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container">
-            <a class="navbar-brand" href="dashboard_docente.php">Panel del Docente</a>
+            <a class="navbar-brand" href="dashboard_docente.php">
+                <?php echo htmlspecialchars($curso_activo['nombre_curso'] . ' (' . $curso_activo['semestre'] . ')'); ?>
+            </a>
             <a class="btn btn-outline-light" href="dashboard_docente.php">Volver al Dashboard</a>
         </div>
     </nav>
 
     <div class="container mt-5">
+        <h1>Gestionar Criterios</h1>
+        <p class="lead">Curso Activo: <strong><?php echo htmlspecialchars($curso_activo['nombre_curso'] . ' ' . $curso_activo['semestre']); ?></strong></p>
+
+        <?php if ($status_message): ?>
+            <div class="alert alert-success"><?php echo $status_message; ?></div>
+        <?php endif; ?>
+        <?php if ($error_message): ?>
+            <div class="alert alert-danger"><?php echo $error_message; ?></div>
+        <?php endif; ?>
+
         <div class="row">
-            <!-- Columna para añadir nuevo criterio -->
             <div class="col-md-4">
                 <div class="card">
                     <div class="card-header"><h4>Añadir Nuevo Criterio</h4></div>
@@ -43,39 +71,42 @@ $criterios = $conn->query("SELECT * FROM criterios ORDER BY orden ASC");
                 </div>
             </div>
 
-            <!-- Columna para listar criterios existentes -->
             <div class="col-md-8">
-                <h4>Criterios Actuales</h4>
+                <h4>Criterios Actuales del Curso</h4>
                 <table class="table table-striped">
                     <thead><tr><th>Orden</th><th>Descripción</th><th>Estado</th><th>Acciones</th></tr></thead>
                     <tbody>
-                        <?php while($criterio = $criterios->fetch_assoc()): ?>
-                        <tr>
-                            <td><?php echo $criterio['orden']; ?></td>
-                            <td><?php echo htmlspecialchars($criterio['descripcion']); ?></td>
-                            <td>
-                                <?php if ($criterio['activo']): ?>
-                                    <span class="badge bg-success">Activo</span>
-                                <?php else: ?>
-                                    <span class="badge bg-secondary">Inactivo</span>
-                                <?php endif; ?>
-                            </td>
-                            <td>
-                                <form action="criterios_actions.php" method="POST" class="d-inline">
-                                    <input type="hidden" name="id_criterio" value="<?php echo $criterio['id']; ?>">
-                                    <input type="hidden" name="action" value="toggle_status">
-                                    <button type="submit" class="btn btn-sm btn-warning">
-                                        <?php echo $criterio['activo'] ? 'Desactivar' : 'Activar'; ?>
-                                    </button>
-                                </form>
-                                <form action="criterios_actions.php" method="POST" class="d-inline">
-                                    <input type="hidden" name="id_criterio" value="<?php echo $criterio['id']; ?>">
-                                    <input type="hidden" name="action" value="delete">
-                                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('¿Estás seguro de que quieres eliminar este criterio?');">Eliminar</button>
-                                </form>
-                            </td>
-                        </tr>
-                        <?php endwhile; ?>
+                        <?php if ($criterios->num_rows > 0): ?>
+                            <?php while($criterio = $criterios->fetch_assoc()): ?>
+                            <tr>
+                                <td><?php echo $criterio['orden']; ?></td>
+                                <td><?php echo htmlspecialchars($criterio['descripcion']); ?></td>
+                                <td>
+                                    <?php if ($criterio['activo']): ?>
+                                        <span class="badge bg-success">Activo</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-secondary">Inactivo</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <form action="criterios_actions.php" method="POST" class="d-inline">
+                                        <input type="hidden" name="id_criterio" value="<?php echo $criterio['id']; ?>">
+                                        <input type="hidden" name="action" value="toggle_status">
+                                        <button type="submit" class="btn btn-sm btn-warning">
+                                            <?php echo $criterio['activo'] ? 'Desactivar' : 'Activar'; ?>
+                                        </button>
+                                    </form>
+                                    <form action="criterios_actions.php" method="POST" class="d-inline">
+                                        <input type="hidden" name="id_criterio" value="<?php echo $criterio['id']; ?>">
+                                        <input type="hidden" name="action" value="delete">
+                                        <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('¿Estás seguro de que quieres eliminar este criterio? Esto no se puede deshacer.');">Eliminar</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            <?php endwhile; ?>
+                        <?php else: ?>
+                            <tr><td colspan="4" class="text-center">Aún no hay criterios definidos para este curso.</td></tr>
+                        <?php endif; ?>
                     </tbody>
                 </table>
             </div>

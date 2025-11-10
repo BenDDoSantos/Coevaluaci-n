@@ -26,8 +26,8 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         exit();
     }
 
-    // Consulta a la BD actualizada para obtener también la contraseña
-    $stmt = $conn->prepare("SELECT id, nombre, password, id_equipo, es_docente FROM usuarios WHERE email = ?");
+    // Consulta a la BD actualizada para obtener también la contraseña y el id_curso del estudiante
+    $stmt = $conn->prepare("SELECT id, nombre, password, id_equipo, es_docente, id_curso FROM usuarios WHERE email = ?");
     $stmt->bind_param("s", $email);
     $stmt->execute();
     $resultado = $stmt->get_result();
@@ -35,29 +35,34 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
     if ($resultado->num_rows == 1) {
         $usuario = $resultado->fetch_assoc();
 
-        // --- NUEVA LÓGICA DE VERIFICACIÓN DE CONTRASEÑA ---
+        // --- LÓGICA DE VERIFICACIÓN DE CONTRASEÑA ---
         if ($usuario['es_docente']) {
             $password_ingresada = $_POST['password'] ?? '';
             
-            // Si es docente, su campo 'password' en la BD no debe ser nulo.
-            // Y la contraseña ingresada debe coincidir con la hasheada.
             if ($usuario['password'] === null || !password_verify($password_ingresada, $usuario['password'])) {
                 header("Location: index.php?error=Correo o contraseña incorrectos.");
                 exit();
             }
         }
-        // Si no es docente, se salta esta verificación y continúa.
 
         // Si la verificación fue exitosa (o no fue necesaria), creamos la sesión.
         $_SESSION['id_usuario'] = $usuario['id'];
         $_SESSION['nombre'] = $usuario['nombre'];
         $_SESSION['id_equipo'] = $usuario['id_equipo'];
         $_SESSION['es_docente'] = $usuario['es_docente'];
+        
+        // Si el usuario es estudiante, guardamos su id_curso directamente en la sesión
+        // Los docentes lo establecerán en select_course.php
+        if (!$usuario['es_docente']) {
+             $_SESSION['id_curso_activo'] = $usuario['id_curso'];
+        }
 
-        // Redirigir según el rol
+        // --- NUEVA LÓGICA DE REDIRECCIÓN SEGÚN ROL ---
         if ($usuario['es_docente']) {
-            header("Location: dashboard_docente.php");
+            // REDIRECCIÓN CLAVE: El docente debe ir a seleccionar su curso
+            header("Location: select_course.php");
         } else {
+            // El estudiante va directo a su dashboard (asumiendo que ya tiene un curso asignado)
             header("Location: dashboard_estudiante.php");
         }
         exit();

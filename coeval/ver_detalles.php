@@ -1,62 +1,282 @@
 <?php
 require 'db.php';
-verificar_sesion(true);
+// Requerir ser docente Y tener un curso activo
+verificar_sesion(true, true); 
 
-if (!isset($_GET['id']) || !is_numeric($_GET['id'])) {
-    header("Location: dashboard_docente.php"); exit();
+$id_curso_activo = get_active_course_id();
+$id_equipo = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+
+if ($id_equipo === 0) {
+    header("Location: dashboard_docente.php?error=" . urlencode("ID de equipo no proporcionado."));
+    exit();
 }
-$id_equipo = $_GET['id'];
 
-$stmt_equipo = $conn->prepare("SELECT nombre_equipo FROM equipos WHERE id = ?");
-$stmt_equipo->bind_param("i", $id_equipo);
+// ----------------------------------------------------------------------
+// 1. OBTENER INFORMACIÓN DEL EQUIPO Y VALIDAR PERTENENCIA AL CURSO ACTIVO
+// ----------------------------------------------------------------------
+$stmt_equipo = $conn->prepare("SELECT nombre_equipo, estado_presentacion FROM equipos WHERE id = ? AND id_curso = ?");
+$stmt_equipo->bind_param("ii", $id_equipo, $id_curso_activo);
 $stmt_equipo->execute();
-$equipo = $stmt_equipo->get_result()->fetch_assoc();
-if (!$equipo) { header("Location: dashboard_docente.php"); exit(); }
+$equipo_info = $stmt_equipo->get_result()->fetch_assoc();
+$stmt_equipo->close();
 
-// ***** LA CORRECCIÓN ESTÁ AQUÍ *****
-// Se cambió 'evaluaciones v' por 'evaluaciones_maestro v'
-$sql_detalles = "
-    SELECT u.nombre, u.email, u.es_docente, v.puntaje_total, v.fecha_evaluacion
-    FROM evaluaciones_maestro v
-    JOIN usuarios u ON v.id_evaluador = u.id
-    WHERE v.id_equipo_evaluado = ?
-    ORDER BY u.es_docente DESC, u.nombre ASC";
+if (!$equipo_info) {
+    header("Location: dashboard_docente.php?error=" . urlencode("Equipo no encontrado o no pertenece a tu curso activo."));
+    exit();
+}
+$nombre_equipo = $equipo_info['nombre_equipo'];
+$estado_presentacion = $equipo_info['estado_presentacion'];
 
-$stmt_detalles = $conn->prepare($sql_detalles);
-$stmt_detalles->bind_param("i", $id_equipo);
-$stmt_detalles->execute();
-$detalles = $stmt_detalles->get_result();
+// Opcional: Obtener el nombre del curso para el título
+$stmt_curso = $conn->prepare("SELECT nombre_curso, semestre FROM cursos WHERE id = ?");
+$stmt_curso->bind_param("i", $id_curso_activo);
+$stmt_curso->execute();
+$curso_activo = $stmt_curso->get_result()->fetch_assoc();
+$stmt_curso->close();
+
+
+// ----------------------------------------------------------------------
+// 2. OBTENER ESTUDIANTES DEL EQUIPO (Ya filtrado implícitamente por el id_equipo que pertenece al curso)
+// ----------------------------------------------------------------------
+$stmt_estudiantes = $conn->prepare("SELECT nombre, email FROM usuarios WHERE id_equipo = ?");
+$stmt_estudiantes->bind_param("i", $id_equipo);
+$stmt_estudiantes->execute();
+$estudiantes = $stmt_estudiantes->get_result();
+
+// ----------------------------------------------------------------------
+// 3. OBTENER CRITERIOS DEL CURSO ACTIVO (para la tabla de promedios)
+// ----------------------------------------------------------------------
+$stmt_criterios = $conn->prepare("SELECT id, descripcion FROM criterios WHERE id_curso = ? AND activo = 1 ORDER BY orden ASC");
+$stmt_criterios->bind_param("i", $id_curso_activo);
+$stmt_criterios->execute();
+$criterios_result = $stmt_criterios->get_result();
+
+$criterios_map = [];
+while ($criterio = $criterios_result->fetch_assoc()) {
+    $criterios_map[$criterio['id']] = $criterio['descripcion'];
+}
+$stmt_criterios->close();
+
+
+// ----------------------------------------------------------------------
+// 4. OBTENER EVALUACIONES MAESTRAS Y DETALLES
+// Se filtran las evaluaciones por el equipo Y por el curso.
+// ----------------------------------------------------------------------
+$sql_evaluaciones = "
+    SELECT 
+        em.id AS id_evaluacion, 
+        em.puntaje_total, 
+        u.nombre AS nombre_evaluador,
+        em.fecha_evaluacion
+    FROM evaluaciones_maestro em
+    JOIN usuarios u ON em.id_evaluador = u.id
+    WHERE em.id_equipo_evaluado = ? AND em.id_curso = ? -- Filtro CLAVE
+    ORDER BY em.fecha_evaluacion DESC";
+    
+$stmt_evaluaciones = $conn->prepare($sql_evaluaciones);
+$stmt_evaluaciones->bind_param("ii", $id_equipo, $id_curso_activo);
+$stmt_evaluaciones->execute();
+$evaluaciones_maestro = $stmt_evaluaciones->get_result();
+
+$evaluaciones_detalle = [];
+$puntajes_totales_criterios = [];
+$num_evaluaciones = $evaluaciones_maestro->num_rows;
+
+// Iterar sobre las evaluaciones para obtener detalles y calcular promedios
+if ($num_evaluaciones > 0) {
+    while($eval = $evaluaciones_maestro->fetch_assoc()){
+        $id_evaluacion = $eval['id_evaluacion'];
+        $evaluaciones_detalle[$id_evaluacion] = $eval;
+        $evaluaciones_detalle[$id_evaluacion]['detalles'] = [];
+
+        // Obtener los detalles de la evaluación específica
+        $stmt_detalle = $conn->prepare("SELECT id_criterio, puntaje FROM evaluaciones_detalle WHERE id_evaluacion = ?");
+        $stmt_detalle->bind_param("i", $id_evaluacion);
+        $stmt_detalle->execute();
+        $detalles = $stmt_detalle->get_result();
+        
+        while ($detalle = $detalles->fetch_assoc()) {
+            $id_criterio = $detalle['id_criterio'];
+            $puntaje = $detalle['puntaje'];
+            
+            // Llenar el detalle para la tabla de evaluadores
+            $evaluaciones_detalle[$id_evaluacion]['detalles'][$id_criterio] = $puntaje;
+
+            // Sumar para calcular promedio por criterio
+            if (!isset($puntajes_totales_criterios[$id_criterio])) {
+                $puntajes_totales_criterios[$id_criterio] = 0;
+            }
+            $puntajes_totales_criterios[$id_criterio] += $puntaje;
+        }
+        $stmt_detalle->close();
+    }
+}
+
+
+// Calcular promedios finales por criterio
+$promedios_criterios = [];
+if ($num_evaluaciones > 0) {
+    foreach ($puntajes_totales_criterios as $id_criterio => $total) {
+        $promedios_criterios[$id_criterio] = $total / $num_evaluaciones;
+    }
+}
+
+// ----------------------------------------------------------------------
+// 5. Función para obtener la Nota Final (copiada de dashboard_docente.php)
+// ----------------------------------------------------------------------
+function calcular_nota_final($puntaje, $conn, $id_curso_activo) {
+    if ($puntaje === null) return "N/A";
+
+    $stmt = $conn->prepare("
+        SELECT nota FROM escala_notas 
+        WHERE id_curso = ?
+        ORDER BY ABS(puntaje - ?) ASC 
+        LIMIT 1"
+    );
+    $puntaje_redondeado = round($puntaje);
+    $stmt->bind_param("ii", $id_curso_activo, $puntaje_redondeado);
+    $stmt->execute();
+    $resultado = $stmt->get_result();
+
+    if ($resultado->num_rows > 0) {
+        return number_format($resultado->fetch_assoc()['nota'], 1);
+    }
+
+    return "S/E"; // Sin Escala
+}
+
+// Obtener el puntaje promedio general del equipo
+$sql_promedio_general = "SELECT AVG(puntaje_total) AS promedio FROM evaluaciones_maestro WHERE id_equipo_evaluado = ? AND id_curso = ?";
+$stmt_promedio = $conn->prepare($sql_promedio_general);
+$stmt_promedio->bind_param("ii", $id_equipo, $id_curso_activo);
+$stmt_promedio->execute();
+$promedio_general = $stmt_promedio->get_result()->fetch_assoc()['promedio'];
+$stmt_promedio->close();
+
+$nota_final = calcular_nota_final($promedio_general, $conn, $id_curso_activo);
+
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <title>Detalles de Evaluación</title>
+    <title>Detalles de Evaluación - <?php echo htmlspecialchars($nombre_equipo); ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark"><div class="container"><a class="navbar-brand" href="dashboard_docente.php">Panel del Docente</a><ul class="navbar-nav ms-auto"><li class="nav-item"><a class="btn btn-outline-light" href="dashboard_docente.php">Volver al Dashboard</a></li></ul></div></nav>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="dashboard_docente.php">
+                <?php echo htmlspecialchars($curso_activo['nombre_curso'] . ' (' . $curso_activo['semestre'] . ')'); ?>
+            </a>
+            <a class="btn btn-outline-light" href="dashboard_docente.php">Volver al Dashboard</a>
+        </div>
+    </nav>
+
     <div class="container mt-5">
-        <h1 class="mb-4">Detalles de Evaluación para: <strong><?php echo htmlspecialchars($equipo['nombre_equipo']); ?></strong></h1>
-        <div class="card"><div class="card-body"><table class="table table-striped table-hover"><thead class="table-light"><tr><th>Evaluador</th><th>Correo</th><th class="text-center">Rol</th><th class="text-center">Puntaje</th><th>Fecha</th></tr></thead>
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>Detalles: <?php echo htmlspecialchars($nombre_equipo); ?></h1>
+            <span class="badge bg-primary fs-5">Curso: <?php echo htmlspecialchars($curso_activo['nombre_curso']); ?></span>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="card text-center bg-light">
+                    <div class="card-body">
+                        <h5 class="card-title">Puntaje Promedio Total</h5>
+                        <p class="card-text fs-2 fw-bold"><?php echo $promedio_general !== null ? number_format($promedio_general, 2) : 'N/A'; ?></p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center bg-light">
+                    <div class="card-body">
+                        <h5 class="card-title">Nota Final</h5>
+                        <p class="card-text fs-2 fw-bold text-success"><?php echo $nota_final; ?></p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center bg-light">
+                    <div class="card-body">
+                        <h5 class="card-title">Estado de Presentación</h5>
+                        <p class="card-text fs-2 fw-bold"><?php echo ucfirst(htmlspecialchars($estado_presentacion)); ?></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <h2 class="mt-4">Miembros del Equipo</h2>
+        <table class="table table-bordered">
+            <thead><tr><th>Nombre</th><th>Correo</th></tr></thead>
             <tbody>
-                <?php if ($detalles->num_rows > 0): ?>
-                    <?php while ($detalle = $detalles->fetch_assoc()): ?>
+                <?php while($estudiante = $estudiantes->fetch_assoc()): ?>
+                <tr>
+                    <td><?php echo htmlspecialchars($estudiante['nombre']); ?></td>
+                    <td><?php echo htmlspecialchars($estudiante['email']); ?></td>
+                </tr>
+                <?php endwhile; ?>
+            </tbody>
+        </table>
+
+        <h2 class="mt-5">Promedio por Criterio de Evaluación</h2>
+        <table class="table table-bordered table-striped">
+            <thead><tr><th>Criterio</th><th class="text-center">Puntaje Promedio</th></tr></thead>
+            <tbody>
+                <?php if (!empty($promedios_criterios)): ?>
+                    <?php foreach ($criterios_map as $id_criterio => $descripcion): ?>
                     <tr>
-                        <td><?php echo htmlspecialchars($detalle['nombre']); ?></td>
-                        <td><?php echo htmlspecialchars($detalle['email']); ?></td>
-                        <td class="text-center">
-                            <?php if ($detalle['es_docente']): ?><span class="badge bg-primary">Docente</span><?php else: ?><span class="badge bg-secondary">Estudiante</span><?php endif; ?>
+                        <td><?php echo htmlspecialchars($descripcion); ?></td>
+                        <td class="text-center fw-bold">
+                            <?php echo isset($promedios_criterios[$id_criterio]) ? number_format($promedios_criterios[$id_criterio], 2) : '0.00'; ?>
                         </td>
-                        <td class="text-center fw-bold"><?php echo $detalle['puntaje_total']; ?></td>
-                        <td><?php echo date("d/m/Y H:i", strtotime($detalle['fecha_evaluacion'])); ?></td>
                     </tr>
-                    <?php endwhile; ?>
+                    <?php endforeach; ?>
                 <?php else: ?>
-                    <tr><td colspan="5" class="text-center">Este equipo aún no ha recibido evaluaciones.</td></tr>
+                    <tr><td colspan="2" class="text-center">No hay evaluaciones o criterios activos para este equipo/curso.</td></tr>
                 <?php endif; ?>
-            </tbody></table></div></div>
+            </tbody>
+        </table>
+
+        <h2 class="mt-5">Detalle de Evaluaciones Individuales (<?php echo $num_evaluaciones; ?>)</h2>
+        <?php if ($num_evaluaciones > 0): ?>
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm">
+                    <thead>
+                        <tr>
+                            <th rowspan="2" class="align-middle">Evaluador</th>
+                            <th rowspan="2" class="align-middle text-center">Puntaje Total</th>
+                            <th colspan="<?php echo count($criterios_map); ?>" class="text-center">Puntaje por Criterio</th>
+                            <th rowspan="2" class="align-middle">Fecha</th>
+                        </tr>
+                        <tr>
+                            <?php foreach ($criterios_map as $id_criterio => $descripcion): ?>
+                                <th class="text-center small" title="<?php echo htmlspecialchars($descripcion); ?>">
+                                    <?php echo substr($descripcion, 0, 15) . '...'; ?>
+                                </th>
+                            <?php endforeach; ?>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($evaluaciones_detalle as $eval): ?>
+                        <tr>
+                            <td><?php echo htmlspecialchars($eval['nombre_evaluador']); ?></td>
+                            <td class="text-center fw-bold"><?php echo $eval['puntaje_total']; ?></td>
+                            <?php foreach ($criterios_map as $id_criterio => $descripcion): ?>
+                                <td class="text-center">
+                                    <?php echo isset($eval['detalles'][$id_criterio]) ? $eval['detalles'][$id_criterio] : 'N/A'; ?>
+                                </td>
+                            <?php endforeach; ?>
+                            <td><?php echo date("Y-m-d H:i", strtotime($eval['fecha_evaluacion'])); ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php else: ?>
+            <div class="alert alert-info">Aún no hay evaluaciones registradas para este equipo en el curso activo.</div>
+        <?php endif; ?>
     </div>
 </body>
 </html>

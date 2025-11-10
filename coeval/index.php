@@ -57,5 +57,9 @@
             }
         });
     </script>
+    
+    <p class="text-center mt-3">
+    ¿Eres un nuevo docente? <a href="registro.php">Regístrate aquí</a>
+</p>
 </body>
 </html>
